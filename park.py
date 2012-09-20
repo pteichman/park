@@ -4,6 +4,7 @@
 __version__ = "1.0.0"
 
 import abc
+import contextlib
 import itertools
 import logging
 import os
@@ -372,6 +373,16 @@ class PostgresStore(KVStore):
     :type database: str
     """
     def __init__(self, database):
+        with contextlib.closing(psycopg2.connect(host="localhost")) as conn:
+            conn.autocommit = True
+
+            c = conn.cursor()
+            c.execute("SELECT count(*) FROM pg_database WHERE datname = %s",
+                (database,))
+
+            if not c.fetchone()[0]:
+                c.execute("CREATE DATABASE %s" % database)
+
         self.conn = psycopg2.connect(host="localhost", database=database)
 
         c = self.conn.cursor()
@@ -402,18 +413,11 @@ CREATE TABLE kv (
 CREATE FUNCTION upsert_kv(new_key BYTEA, new_value BYTEA) RETURNS VOID AS
 $$
 BEGIN
-    LOOP
+    BEGIN
+        INSERT INTO kv(key, value) VALUES (new_key, new_value);
+    EXCEPTION WHEN unique_violation THEN
         UPDATE kv SET value = new_value WHERE key = new_key;
-        IF found THEN
-            RETURN;
-        END IF;
-        BEGIN
-            INSERT INTO kv(key, value) VALUES (new_key, new_value);
-            RETURN;
-        EXCEPTION WHEN unique_violation THEN
-            -- resolve conflicts by backing off and trying again
-        END;
-    END LOOP;
+    END;
 END;
 $$
 LANGUAGE plpgsql;

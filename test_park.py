@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright 2012 litl, LLC. All Rights Reserved.
 
+import contextlib
 import operator
 import os
 import unittest2 as unittest
@@ -287,19 +288,16 @@ class TestPostgresStore(unittest.TestCase, KVStoreBase):
     DB = "test_park_store"
 
     def setUp(self):
-        import psycopg2
-        conn = psycopg2.connect(host="localhost")
-
-        conn.autocommit = True
-        conn.cursor().execute("CREATE DATABASE %s" % self.DB)
-        conn.autocommit = False
-
         self.store = park.PostgresStore(self.DB)
 
         def cleanup():
+            import psycopg2
+
             self.store.close()
 
-            conn.autocommit = True
-            conn.cursor().execute("DROP DATABASE %s" % self.DB)
+            conn = psycopg2.connect(host="localhost")
+            with contextlib.closing(conn):
+                conn.autocommit = True
+                conn.cursor().execute("DROP DATABASE %s" % self.DB)
 
         self.addCleanup(cleanup)
