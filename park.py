@@ -7,11 +7,12 @@ import abc
 import itertools
 import logging
 import os
+import psycopg2
 import sqlite3
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["SQLiteStore", "KVStore"]
+__all__ = ["SQLiteStore", "PostgresStore", "KVStore"]
 
 
 class KVStore(object):
@@ -360,4 +361,153 @@ CREATE TABLE kv (
 
         c = self.conn.cursor()
         for key, in c.execute(q, dict(key_from=key_from, key_to=key_to)):
+            yield bytes(key)
+
+
+class PostgresStore(KVStore):
+    """A KVStore in an Postgres database.
+
+    :param database: The database name, which will be created if it
+        doesn't exist.
+    :type database: str
+    """
+    def __init__(self, database):
+        self.conn = psycopg2.connect(host="localhost", database=database)
+
+        c = self.conn.cursor()
+        c.execute("SELECT * FROM information_schema.tables "
+            "WHERE table_name=%s", ("kv",))
+
+        need_schema = not bool(c.rowcount)
+
+        if need_schema:
+            self._create_db(self.conn)
+
+    def close(self):
+        if getattr(self, "conn", None):
+            self.conn.commit()
+            self.conn.close()
+            del self.conn
+
+    def _create_db(self, conn):
+        logger.debug("Creating Postgres schema")
+        c = conn.cursor()
+
+        c.execute("""
+CREATE TABLE kv (
+    key BYTEA NOT NULL PRIMARY KEY,
+    value BYTEA NOT NULL)""")
+
+        c.execute("""
+CREATE FUNCTION upsert_kv(new_key BYTEA, new_value BYTEA) RETURNS VOID AS
+$$
+BEGIN
+    LOOP
+        UPDATE kv SET value = new_value WHERE key = new_key;
+        IF found THEN
+            RETURN;
+        END IF;
+        BEGIN
+            INSERT INTO kv(key, value) VALUES (new_key, new_value);
+            RETURN;
+        EXCEPTION WHEN unique_violation THEN
+            -- resolve conflicts by backing off and trying again
+        END;
+    END LOOP;
+END;
+$$
+LANGUAGE plpgsql;
+""")
+
+        conn.commit()
+
+    def get(self, key, default=None):
+        q = "SELECT value FROM kv WHERE key = %s"
+        c = self.conn.cursor()
+
+        c.execute(q, (buffer(key),))
+
+        row = c.fetchone()
+        if not row:
+            return default
+
+        return bytes(row[0])
+
+    def put(self, key, value):
+        q = "SELECT upsert_kv(%s, %s)"
+        c = self.conn.cursor()
+
+        c.execute(q, (buffer(key), buffer(value)))
+
+        self.conn.commit()
+
+    def put_many(self, items):
+        q = "SELECT upsert_kv(%s, %s)"
+        c = self.conn.cursor()
+
+        for batch in ibatch(items, 30000):
+            items = ((buffer(key), buffer(value)) for key, value in batch)
+
+            c.executemany(q, items)
+            self.conn.commit()
+
+    def delete(self, key):
+        q = "DELETE FROM kv WHERE key = %s"
+        c = self.conn.cursor()
+
+        c.execute(q, (buffer(key),))
+        self.conn.commit()
+
+    def delete_many(self, keys):
+        q = "DELETE FROM kv WHERE key = %s"
+        c = self.conn.cursor()
+
+        for batch in ibatch(keys, 30000):
+            items = ((buffer(key),) for key in batch)
+
+            c.executemany(q, items)
+            self.conn.commit()
+
+    def _range_where(self, key_from=None, key_to=None):
+        if key_from is not None and key_to is None:
+            return "WHERE key >= %(key_from)s"
+
+        if key_from is None and key_to is not None:
+            return "WHERE key <= %(key_to)s"
+
+        if key_from is not None and key_to is not None:
+            return "WHERE key BETWEEN %(key_from)s AND %(key_to)s"
+
+        return ""
+
+    def items(self, key_from=None, key_to=None):
+        q = "SELECT key, value FROM kv %s ORDER BY key" \
+            % self._range_where(key_from, key_to)
+
+        if key_from is not None:
+            key_from = buffer(key_from)
+
+        if key_to is not None:
+            key_to = buffer(key_to)
+
+        c = self.conn.cursor()
+        c.execute(q, dict(key_from=key_from, key_to=key_to))
+
+        for key, value in c:
+            yield bytes(key), bytes(value)
+
+    def keys(self, key_from=None, key_to=None):
+        q = "SELECT key FROM kv %s ORDER BY key" \
+            % self._range_where(key_from, key_to)
+
+        if key_from is not None:
+            key_from = buffer(key_from)
+
+        if key_to is not None:
+            key_to = buffer(key_to)
+
+        c = self.conn.cursor()
+        c.execute(q, dict(key_from=key_from, key_to=key_to))
+
+        for key, in c:
             yield bytes(key)

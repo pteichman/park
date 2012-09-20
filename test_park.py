@@ -281,3 +281,25 @@ class TestSQLiteStore(unittest.TestCase, KVStoreBase):
                 os.unlink(self.DB)
 
         self.addCleanup(cleanup)
+
+
+class TestPostgresStore(unittest.TestCase, KVStoreBase):
+    DB = "test_park_store"
+
+    def setUp(self):
+        import psycopg2
+        conn = psycopg2.connect(host="localhost")
+
+        conn.autocommit = True
+        conn.cursor().execute("CREATE DATABASE %s" % self.DB)
+        conn.autocommit = False
+
+        self.store = park.PostgresStore(self.DB)
+
+        def cleanup():
+            self.store.close()
+
+            conn.autocommit = True
+            conn.cursor().execute("DROP DATABASE %s" % self.DB)
+
+        self.addCleanup(cleanup)
