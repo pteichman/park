@@ -406,8 +406,10 @@ class PostgresStore(KVStore):
 
         c.execute("""
 CREATE TABLE kv (
-    key BYTEA NOT NULL PRIMARY KEY,
+    key BYTEA NOT NULL,
     value BYTEA NOT NULL)""")
+
+        c.execute("CREATE UNIQUE INDEX kv_key_index ON kv (key)")
 
         c.execute("""
 CREATE FUNCTION upsert_kv(new_key BYTEA, new_value BYTEA) RETURNS VOID AS
